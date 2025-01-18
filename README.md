@@ -3,4 +3,5 @@ Project to create an AI who convert ".xlsx" files into ".csv" and ".json" with P
 
 #### Libraries
 > You must have these dependences
+> <pre><code>pip install openai</code></pre>
 > <pre><code>pip install pyautogui</code></pre>
