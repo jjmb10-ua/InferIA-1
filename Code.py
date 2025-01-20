@@ -5,6 +5,142 @@ import re
 import json
 import pandas as pd
 from openpyxl import Workbook, load_workbook
+import pyautogui
+import subprocess
+import time
+import openai
+from pydantic import BaseModel
+from typing import Optional
+import base64
+
+# Configurar la API Key
+client = openai.Client(api_key="")
+
+# Open a file, take screenshot and save the image
+def takeScreenshot(filename, output_dir="images"):
+    # Verify if the file exists
+    if not os.path.exists(filename):
+        print(f"File does not exists: {filename}")
+        return
+
+    # Create the directory
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Load the Excel file to obtain the sheets
+    try:
+        wb = load_workbook(filename, read_only=True)
+        sheets = wb.sheetnames
+        print(f"Sheets founds: {sheets}")
+    except Exception as e:
+        print(f"Error processing sheets: {e}")
+        return
+
+    # Open the file
+    try:
+        print(f"Opening the file: {filename}. Waiting for Excel to fully load...")
+        subprocess.Popen(['start', filename], shell=True)
+        time.sleep(5)  # Wait for the file to open completely
+    except Exception as e:
+        print(f"Error opening the file: {e}")
+        return
+
+    # Put Excel in full screen
+    try:
+        pyautogui.hotkey("alt", "space")  # Open the window menu
+        time.sleep(1)
+        pyautogui.press("x")  # Maximize de window
+        time.sleep(1)
+        pyautogui.hotkey("ctrl", "f1")  # Hide options
+        time.sleep(2)
+    except Exception as e:
+        print(f"Error maximizing excel: {e}")
+        return
+
+    # Take the screenshot of each sheet
+    for i, sh in enumerate(sheets):
+        try:
+            # Change the sheet using (Ctrl+PgDown o Ctrl+PgUp)
+            if i > 0:
+                pyautogui.hotkey("ctrl", "pgdn")  # Navigate to the next sheet
+                time.sleep(2)  # Wait for the sheet to load
+
+            # Take the screenshot
+            screenshot = pyautogui.screenshot()
+            filename = f"sh{i + 1}_{sh}.png"
+            filepath = os.path.join(output_dir, filename)
+            screenshot.save(filepath)
+            print(f"Screenshot saved in: {filepath}")
+        except Exception as e:
+            print(f"Error taking the screenshot for the sheet {sh}: {e}")
+
+    # Close the file
+    try:
+        print("Closing the file...")
+        pyautogui.hotkey("alt", "f4")
+        print("File closed correctly.")
+    except Exception as e:
+        print(f"Error closing the file: {e}")
+    finally:
+        wb.close()
+
+# Función para crear una clase dinámica de Pydantic
+def createDynamicClass(class_name: str, attributes: list):
+    # Usamos `__annotations__` para definir los tipos correctamente
+    fields = {attr: Optional[str] for attr in attributes}  # Solo anotación de tipo
+    defaults = {attr: None for attr in attributes}  # Valores predeterminados
+    
+    # Crear la clase con `type`
+    dynamic_class = type(class_name, (BaseModel,), {"__annotations__": fields, **defaults})
+    return dynamic_class
+
+# Function to encode the image
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
+# Convierte la respuesta en diccionario y la guarda como JSON
+def save_dict_to_json(response_model, outputFile):
+    try:
+        # Convertir la respuesta del modelo Pydantic a un diccionario
+        response_dict = response_model.model_dump()
+
+        # Guardar el diccionario en un archivo JSON
+        with open(outputFile, "w", encoding="utf-8") as json_file:
+            json.dump(response_dict, json_file, indent=4, ensure_ascii=False)
+
+        print(f"Datos guardados en {outputFile}")
+    except Exception as e:
+        print(f"Error al guardar los datos en JSON: {e}")
+
+def processMetadata(sh_index, sh, attributes):
+    # Create dynamic class with specified attributes
+    DynamicModel = createDynamicClass("DynamicModel", attributes)
+
+    # Path to your image
+    image_path = f"images/sh{sh_index}_{sh.title}.png"
+    # Getting the base64 string
+    base64_image = encode_image(image_path)
+
+    completion = client.beta.chat.completions.parse(
+        model="gpt-4o-2024-08-06",
+        messages=[
+            {"role": "system", "content": "You are an expert at structured data extraction. You will be given an image from an Excel sheet and should convert it into the given structure."},
+            {"role": "user", "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                    },
+                ],
+            }
+        ],
+        response_format=DynamicModel,
+    )
+    research_paper = completion.choices[0].message.parsed
+    print("\nResponse from the API:")
+    print(research_paper)
+    outputFile = f"sh{sh_index}_{sh.title}_metada.json"
+    save_dict_to_json(research_paper, outputFile)
 
 def isValidHeader(row_cleaned):
     # Comprobar si cada celda parece un encabezado válido
@@ -20,45 +156,7 @@ def getMissingHeader(fname):
 
     return cleaned_title
 
-def processMetadata(row_cleaned):
-    # If there is only one cell we look for key-value in it
-    if len(row_cleaned) == 1:
-        text = row_cleaned[0]
-
-        # Divide by ":" or "=" if there are
-        if ":" in text:
-            parts = text.split(":", 1)
-            key = parts[0].strip()
-            value = parts[1].strip()
-        elif "=" in text:
-            parts = text.split("=", 1)
-            key = parts[0].strip()
-            value = parts[1].strip()
-        # If there is no specific separator, assume key-value separated by spaces
-        else:
-            parts = text.split(" ", 1)
-            key = parts[0].strip()
-            # if there is only one word, there is no more information
-            value = " ".join(parts[1:]).strip() or "No information"
-    
-    # With more than one cell, the first is the key and the rest are values
-    elif len(row_cleaned) >= 2:
-        key = row_cleaned[0].strip()
-        # Join the elements of the resulting list into a single string, separating them with a space
-        value = " ".join(row_cleaned[1:]).strip()
-
-    else:
-        key, value = "Desconocido", ""
-
-    # Normalizar el formato
-    key = key.capitalize()
-    return key, value
-
-# Processes each sheet and distinguish between metadata and data
-def processSheet(fname,sh):
-    # Separate metadata and data
-    metadata = {}
-    table_begin = False
+def processData(fname, sh_index, sh, headers):
     data = []
     headers = None
 
@@ -90,47 +188,39 @@ def processSheet(fname,sh):
             except StopIteration:
                 print(f"Row {row_index} is the last row or next row does not exists.")
         
-        elif table_begin:
+        else:
             # Append remaining rows as data
             data.append(row)
+
+        # Create filenames for the sheet
+        sheet_name = sh.title.replace(" ", "_")
+        data_filename = f"{sheet_name}_data.csv"
+
+        # Save data as CSV if headers and data exist
+        if headers and data:
+            # Ensure all rows have the same length as headers
+            data = [row[:len(headers)] for row in data]
+
+            df = pd.DataFrame(data, columns=headers)
+            df.to_csv(data_filename, index=False, encoding="utf-8")
+            print(f"Data saved to {data_filename}")
         else:
-            # Add row to metadata
-            key, value = processMetadata(row_cleaned)
-            metadata[key] = value
+            print(f"No table data found in sheet '{sh.title}'")
 
-    # Create filenames for the sheet
-    sheet_name = sh.title.replace(" ", "_")
-    metadata_filename = f"{sheet_name}_metadata.json"
-    data_filename = f"{sheet_name}_data.csv"
+# Processes each sheet and distinguish between metadata and data
+def processSheet(fname, sh_index, sh, attributes):
+    # Separate metadata and data
+    processMetadata(sh_index, sh, attributes)
 
-    # Save metadata as JSON
-    metadata_dict = {
-        "sheet_name": sh.title,
-        "metadata_rows": len(metadata),
-        "metadata": metadata
-    }
-    with open(metadata_filename, "w", encoding="utf-8") as json_file:
-        json.dump(metadata_dict, json_file, ensure_ascii=False, indent=4)
-    print(f"Metadata saved to {metadata_filename}")
-
-    # Save data as CSV if headers and data exist
-    if headers and data:
-        # Ensure all rows have the same length as headers
-        data = [row[:len(headers)] for row in data]
-
-        df = pd.DataFrame(data, columns=headers)
-        df.to_csv(data_filename, index=False, encoding="utf-8")
-        print(f"Data saved to {data_filename}")
-    else:
-        print(f"No table data found in sheet '{sh.title}'")
+    # processData(fname, sh_index, sh)
 
 # Try to open the file and iterate all sheets
-def openFile(filename):
+def openFile(filename, attributes):
     try:
         wb = load_workbook(filename, read_only=True)
 
-        for sheet in wb:
-            processSheet(filename,sheet)
+        for sh_index, sheet in enumerate(wb, start=1):
+            processSheet(filename, sh_index, sheet, attributes)
 
     except FileNotFoundError:
         print(f"Error: File '{filename}' not found.")
@@ -138,12 +228,19 @@ def openFile(filename):
         print(f"Oops... error : {e}")
 
 def main():
-    if len(sys.argv) == 2:
-        filename = sys.argv[1]
-        openFile(filename)
-    else:
-        print("Usage: python Code.py <file.xlsx>")
+    if len(sys.argv) < 3:
+        print("Usage: python .\Code.py <EXCEL_SHEET> <ATTRIBUTES...>")
         sys.exit(1)
+
+    # First argument is Excel sheet
+    excel_path = sys.argv[1]
+    # The following arguments are the metadata attributes
+    attributes = sys.argv[2:]
+
+    # Capture the entire screen from all sheets after opening the file
+    takeScreenshot(excel_path)
+
+    openFile(excel_path, attributes)
 
 ######################### MAIN ##########################
 
