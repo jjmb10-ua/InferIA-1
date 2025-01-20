@@ -10,7 +10,7 @@ import subprocess
 import time
 import openai
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import base64
 
 # Configurar la API Key
@@ -84,13 +84,17 @@ def takeScreenshot(filename, output_dir="images"):
     finally:
         wb.close()
 
-# Función para crear una clase dinámica de Pydantic
+# Function to create a dinamic class
 def createDynamicClass(class_name: str, attributes: list):
-    # Usamos `__annotations__` para definir los tipos correctamente
-    fields = {attr: Optional[str] for attr in attributes}  # Solo anotación de tipo
-    defaults = {attr: None for attr in attributes}  # Valores predeterminados
+    # Using `__annotations__` to define types correctly
+    fields = {attr: Optional[str] for attr in attributes}  # Only type annotation
+    defaults = {attr: None for attr in attributes}  # Default values
     
-    # Crear la clase con `type`
+    # Adding the attribute 'headers'
+    fields["headers"] = Optional[List[str]]
+    defaults["headers"] = None
+
+    # Create class with `type`
     dynamic_class = type(class_name, (BaseModel,), {"__annotations__": fields, **defaults})
     return dynamic_class
 
@@ -142,6 +146,16 @@ def processMetadata(sh_index, sh, attributes):
     outputFile = f"sh{sh_index}_{sh.title}_metada.json"
     save_dict_to_json(research_paper, outputFile)
 
+    # Obtener el uso de tokens del objeto `completion`
+    usage = completion.usage  # Acceder directamente a la propiedad `usage`
+    if usage:
+        total_tokens = usage.total_tokens  # Acceder al atributo directamente
+        print(f"Total tokens utilizados: {total_tokens}")
+    else:
+        print("No se pudo obtener información sobre el uso de tokens.")
+
+    return research_paper.headers
+
 def isValidHeader(row_cleaned):
     # Comprobar si cada celda parece un encabezado válido
     return all(cell.isalpha() or cell.replace(" ", "").isalnum() for cell in row_cleaned)
@@ -156,63 +170,72 @@ def getMissingHeader(fname):
 
     return cleaned_title
 
+# Finds the starting line of the data based on the most frequent number of non-empty columns
+def findDataStart(sheet, expected_headers):
+    # Minimum number of expected columns (based on the provided headers)
+    min_columns = len(expected_headers)
+
+    # Dictionary to store statistics
+    column_stats = {}
+
+    # Normalize expected headers to lowercase
+    normalized_headers = [header.lower() for header in expected_headers]
+
+    # Iterate over the rows in the sheet
+    for row_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+        # Count the number of non-empty cells in the row
+        non_empty_cells = [cell for cell in row if cell is not None]
+
+        # Normalize the row cells to lowercase
+        normalized_row = [str(cell).lower() for cell in non_empty_cells]
+
+        # Check if the row matches the expected headers, to skip it
+        if set(normalized_row) == set(normalized_headers):
+            # Skip this row because it appears to be a header
+            continue
+
+        # Only record rows with at least the minimum number of expected columns
+        if len(non_empty_cells) >= min_columns:
+            if len(non_empty_cells) not in column_stats:
+                # If this number of columns is not in the dictionary, initialize it
+                column_stats[len(non_empty_cells)] = {
+                    "first_row": row_idx,  # Store the first row where it appears
+                    "count": 0  # Initial counter
+                }
+            # Increment the counter
+            column_stats[len(non_empty_cells)]["count"] += 1
+
+    # If no rows were found, return -1
+    if not column_stats:
+        return -1
+
+    # Find the number of columns with the highest occurrences
+    most_frequent = max(column_stats.items(), key=lambda x: x[1]["count"])
+    most_frequent_row = most_frequent[1]["first_row"]
+
+    # print(f"Column statistics: {column_stats}")
+    return most_frequent_row
+
 def processData(fname, sh_index, sh, headers):
-    data = []
-    headers = None
 
-    # Iterate through all rows in the sheet and adds an index
-    for row_index, row in enumerate(sh.iter_rows(values_only=True), start=1):
-        # Clean up the row: filter out None values and convert to strings
-        row_cleaned = [str(cell) for cell in row if cell is not None]
+    # Find the most representative row
+    data_start_row = findDataStart(sh, headers)
 
-        if not table_begin and len(row_cleaned) > 1:
-            # Trying to access to the next row
-            try:
-                next_row = next(sh.iter_rows(min_row=row_index+1, max_row=row_index+1, values_only=True))
-                next_row_cleaned = [str(cell) for cell in next_row if cell is not None]
+    if data_start_row == -1:
+        print("No rows with data were found.")
+        return
+    else:
+        print(f"Data starts on row: {data_start_row}")
 
-                # Check if the next row has the same number of cells or one more
-                if len(next_row_cleaned) == len(row_cleaned) and isValidHeader(row_cleaned):
-                    headers = row_cleaned
-                    table_begin = True
-                    print(f"Table starts at row {row_index} with headers: {headers}")
-                
-                elif len(next_row_cleaned) == len(row_cleaned) + 1:
-                    # We have to search the missing header on the tittle or metadata
-                    missing_header = getMissingHeader(fname)
-                    headers = [missing_header] + row_cleaned
-                    table_begin = True
-                    print(f"Table starts at row {row_index} with headers: {headers} (missing header added)")
-                else:
-                    print(f"Skipping row {row_index}: does not match the expected structure for headers.")
-            except StopIteration:
-                print(f"Row {row_index} is the last row or next row does not exists.")
-        
-        else:
-            # Append remaining rows as data
-            data.append(row)
-
-        # Create filenames for the sheet
-        sheet_name = sh.title.replace(" ", "_")
-        data_filename = f"{sheet_name}_data.csv"
-
-        # Save data as CSV if headers and data exist
-        if headers and data:
-            # Ensure all rows have the same length as headers
-            data = [row[:len(headers)] for row in data]
-
-            df = pd.DataFrame(data, columns=headers)
-            df.to_csv(data_filename, index=False, encoding="utf-8")
-            print(f"Data saved to {data_filename}")
-        else:
-            print(f"No table data found in sheet '{sh.title}'")
+    # Falta implementar recogida datos y comprobaciones por si ese dato es el total de la columna 
+    
 
 # Processes each sheet and distinguish between metadata and data
 def processSheet(fname, sh_index, sh, attributes):
     # Separate metadata and data
-    processMetadata(sh_index, sh, attributes)
+    headers = processMetadata(sh_index, sh, attributes)
 
-    # processData(fname, sh_index, sh)
+    processData(fname, sh_index, sh, headers)
 
 # Try to open the file and iterate all sheets
 def openFile(filename, attributes):
