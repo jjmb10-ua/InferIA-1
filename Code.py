@@ -12,6 +12,7 @@ import openai
 from pydantic import BaseModel
 from typing import Optional, List
 import base64
+import csv
 
 # Configurar la API Key
 client = openai.Client(api_key="")
@@ -117,6 +118,21 @@ def save_dict_to_json(response_model, outputFile):
     except Exception as e:
         print(f"Error al guardar los datos en JSON: {e}")
 
+def save_to_csv(data, headers, output_file, fname):
+    if headers and isinstance(data, pd.DataFrame) and not data.empty:
+        # Ensure all rows have the same length as headers
+        data = data.iloc[:, :len(headers)]  # Truncate extra columns if any
+
+        # Set column names
+        data.columns = headers
+
+        # Save DataFrame to CSV
+        data.to_csv(output_file, index=False, encoding="utf-8")
+        print(f"Data saved to {output_file}")
+    else:
+        # Handle cases with no data or headers
+        print(f"No table data found in sheet")
+
 def processMetadata(sh_index, sh, attributes):
     # Create dynamic class with specified attributes
     DynamicModel = createDynamicClass("DynamicModel", attributes)
@@ -216,6 +232,62 @@ def findDataStart(sheet, expected_headers):
     # print(f"Column statistics: {column_stats}")
     return most_frequent_row
 
+def fillHeader(headers, total_columns):
+    cont = 1
+    # Add placeholder headers for missing columns
+    while len(headers) < total_columns:
+        if cont == 1:
+            headers = [cont] + headers
+        else:
+            headers = headers + [cont]
+            
+    return headers
+
+def isTotalRow(sheet, row_idx):
+    # Iterate over each column in the row
+    for col_idx in range(1, sheet.max_column + 1):
+        column_values = [
+            sheet.cell(row=r, column=col_idx).value
+            for r in range(1, sheet.max_row + 1)
+            if r != row_idx and isinstance(sheet.cell(row=r, column=col_idx).value, (int, float))
+        ]
+
+        current_value = sheet.cell(row=row_idx, column=col_idx).value
+
+        # Check if the current cell is equal to the sum of other cells in the column
+        if isinstance(current_value, (int, float)) and current_value == sum(column_values):
+            return True
+    return False
+
+def extractData(sh, headers, data_start_row):
+    # Read the first row of data and filter out empty cells
+    first_data_row = [
+        cell for cell in list(sh.iter_rows(min_row=data_start_row, max_row=data_start_row, values_only=True))[0]
+        if cell is not None
+    ]
+
+    # If there are more columns than headers, call fillHeader to complete the headers
+    if len(first_data_row) > len(headers):
+        headers = fillHeader(headers, len(first_data_row))
+
+    # Read all rows from the data_start_row
+    data = []
+    for row_idx, row in enumerate(sh.iter_rows(min_row=data_start_row, values_only=True), start=data_start_row):
+        # Filter out empty cells from the row
+        filtered_row = [cell for cell in row if cell is not None]
+
+        # Check if the row is a "total row" and discard it if so
+        if isTotalRow(sh, row_idx):
+            continue
+
+        # Create a dictionary for each row, mapping headers to their respective column values
+        row_dict = {headers[i]: filtered_row[i] if i < len(filtered_row) else None for i in range(len(headers))}
+        data.append(row_dict)
+
+    # Convert the data into a pandas DataFrame
+    df = pd.DataFrame(data)
+    return headers, df
+
 def processData(fname, sh_index, sh, headers):
 
     # Find the most representative row
@@ -227,8 +299,12 @@ def processData(fname, sh_index, sh, headers):
     else:
         print(f"Data starts on row: {data_start_row}")
 
-    # Falta implementar recogida datos y comprobaciones por si ese dato es el total de la columna 
-    
+    # Extract the data
+    headers, extracted_data = extractData(sh, headers, data_start_row)
+
+    # Save the data to a CSV file
+    outputFile = f"sh{sh_index}_{sh.title}_data.csv"
+    save_to_csv(extracted_data, headers, outputFile, fname)
 
 # Processes each sheet and distinguish between metadata and data
 def processSheet(fname, sh_index, sh, attributes):
@@ -252,7 +328,7 @@ def openFile(filename, attributes):
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python .\Code.py <EXCEL_SHEET> <ATTRIBUTES...>")
+        print("Usage: python Code.py <EXCEL_SHEET> <ATTRIBUTES...>")
         sys.exit(1)
 
     # First argument is Excel sheet
